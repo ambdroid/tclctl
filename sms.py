@@ -22,7 +22,12 @@ PASSPHRASE = "TCT@MiFiRouter"
 
 
 def openssl(data, passphrase, function):
-    """Shell out to openssl for (de)obfuscation of API calls."""
+    """
+    Shell out to openssl for (de)obfuscation of API calls.
+    This should not be called directly; the encrypt() wrapper is cached.
+    (This will result in the same ciphertext being sent multiple times, which would be undesirable
+    when using real encryption, but there is no actual security here so it doesn't matter.)
+    """
     return run(
         ["openssl", "aes-256-cbc", "-md", "md5", "-k", passphrase, function],
         input=data,
@@ -31,7 +36,7 @@ def openssl(data, passphrase, function):
     ).stdout
 
 
-encrypt = partial(openssl, function="-e")
+encrypt = cache(partial(openssl, function="-e"))
 decrypt = partial(openssl, function="-d")
 
 
