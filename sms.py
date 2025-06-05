@@ -7,7 +7,10 @@ from urllib import request
 from random import random
 from os import environ
 from time import time
+import argparse
+import datetime
 import base64
+import enum
 import json
 
 API = "http://192.168.0.1/jrd/webapi?name="
@@ -19,6 +22,23 @@ HEADERS = {
 }
 USERNAME = "dc13ibej?7"  # 'admin' through a custom(?) hash
 PASSPHRASE = "TCT@MiFiRouter"
+
+
+class SMSType(enum.IntEnum):
+    """Corresponds to the JSON field of the same name"""
+
+    READ = 0
+    UNREAD = 1
+    OUTBOX = 2
+    DRAFT = 6  # unused, but ????
+
+
+class SMSBox(enum.StrEnum):
+    """For use with get_sms_list()"""
+
+    INBOX = "inbox"
+    OUTBOX = "send"
+    DRAFTS = "draft"  # unused
 
 
 def openssl(data, passphrase, function):
@@ -104,14 +124,126 @@ class Session:
         return False
 
 
-with Session() as sesh:
-    sms = sesh.api("GetSMSListByContactNum", key="inbox", Page=1)
-    smslist = sms["SMSList"]
-    for page in range(2, sms["TotalPageCount"] + 1):
-        smslist += sesh.api("GetSMSListByContactNum", key="inbox", Page=page)["SMSList"]
-    print(json.dumps(smslist, indent=4))
-    for message in smslist:
-        if message["SMSType"] == 1:  # 1/0 = (un)read
-            # mark message as read, returning only its content
-            # (which you already had if you have its ID...)
-            sesh.api("GetSingleSMS", SMSId=message["SMSId"])
+def get_sms_list(key: SMSBox):
+    """Get all messages from the given 'box'"""
+    with Session() as sesh:
+        sms = sesh.api("GetSMSListByContactNum", key=key, Page=1)
+        smslist = sms["SMSList"]
+        for page in range(2, sms["TotalPageCount"] + 1):
+            smslist += sesh.api("GetSMSListByContactNum", key=key, Page=page)["SMSList"]
+        return smslist
+
+
+def format_message(message):
+    """Format a message for output"""
+    # SMSTimezone is apparently always -28, and SMSTime is apparently always UTC-7
+    # from testing, this seems to remain true regardless of the set timezone
+    # (which has never been UTC-7)
+    # therefore, SMSTimezone evidently represents the UTC offset in 15 minute increments
+    # (...but why UTC-7????)
+    # anyways, the uncorrected UTC-7 time is shown on the web portal
+    # so this program is actually an improvement over the reference implementation >:)
+    # also, outgoing messages have the correct (naive?) datetime because ????????
+    outbox = message["SMSType"] == SMSType.OUTBOX
+    timestamp = datetime.datetime.fromisoformat(message["SMSTime"])
+    if not outbox:
+        timestamp = (
+            timestamp.replace(
+                tzinfo=datetime.timezone(
+                    datetime.timedelta(minutes=15 * message["SMSTimezone"])
+                )
+            )
+            .astimezone()
+            .replace(tzinfo=None)
+        )
+    smsid = message["SMSId"]
+    label = "To" if outbox else "From"
+    # don't know why this is a list, since sending to a group isn't supported
+    sender = ", ".join(message["PhoneNumber"])
+    content = message["SMSContent"]
+    return f"[{smsid}] {label} {sender} at {timestamp}:\n{content}"
+
+
+def command_fetch(outbox=False, no_mark_read=False, all_=False):
+    """Entry point for the fetch command"""
+    smslist = get_sms_list(SMSBox.OUTBOX if outbox else SMSBox.INBOX)
+
+    if formatted := [
+        format_message(message)
+        for message in smslist
+        if all_ or message["SMSType"] != SMSType.READ
+    ]:
+        print("\n--------------------------------\n".join(formatted))
+    else:
+        print("No messages found")
+
+    if not no_mark_read:
+        if unread := list(
+            filter(lambda message: message["SMSType"] == SMSType.UNREAD, smslist)
+        ):
+            with Session() as sesh:
+                for message in unread:
+                    # mark message as read, returning only its content
+                    # (which you already had if you have its ID...)
+                    sesh.api("GetSingleSMS", SMSId=message["SMSId"])
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        prog="tclctl",
+        description="Manage SMS functionality of the TCL Linkport IK511 5G dongle",
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    fetch_parser = subparsers.add_parser("fetch", help="Fetch SMS messages")
+    fetch_parser.add_argument(
+        "--outbox", action="store_true", help="Fetch messages from outbox"
+    )
+
+    inbox_group = fetch_parser.add_argument_group("Inbox options")
+    inbox_group.add_argument(
+        "--no-mark-read", action="store_true", help="Do not mark messages as read"
+    )
+    inbox_group.add_argument(
+        "--all",
+        dest="all_",
+        action="store_true",
+        help="Fetch all messages instead of only unread messages",
+    )
+
+    """
+    send_parser = subparsers.add_parser("send", help="Send an SMS")
+    send_target = send_parser.add_mutually_exclusive_group(required=True)
+    send_target.add_argument(
+        "--number", metavar="phone_number", help="Recipient phone number"
+    )
+    send_target.add_argument(
+        "--reply", metavar="sms_id", type=int, help="SMS ID to reply to"
+    )
+
+    delete_parser = subparsers.add_parser("delete", help="Delete SMS messages")
+    delete_parser.add_argument(
+        "--yes", action="store_true", help="Skip confirmation prompt"
+    )
+    delete_parser.add_argument(
+        "ids", nargs="+", type=int, metavar="id", help="SMS IDs to delete"
+    )
+    """
+
+    args = parser.parse_args()
+
+    if args.command == "fetch" and args.outbox and (args.no_mark_read or args.all_):
+        parser.error(
+            "--outbox cannot be used with inbox options (--no-mark-read/--all)"
+        )
+
+    {
+        "fetch": command_fetch,
+    }[
+        args.command
+    ](**{k: v for k, v in vars(args).items() if k != "command"})
+
+
+if __name__ == "__main__":
+    main()
