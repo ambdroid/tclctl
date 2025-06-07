@@ -60,6 +60,25 @@ encrypt = cache(partial(openssl, function="-e"))
 decrypt = partial(openssl, function="-d")
 
 
+class DecryptionDeferredDict:
+    """
+    Not all API calls return something useful, so decrypting the result is pointless.
+    This class is a transparent wrapper to decrypt the result only if/when it's used.
+    """
+
+    def __init__(self, data, passphrase):
+        (self.data, self.passphrase) = (data, passphrase)
+        self.encrypted = True
+
+    def __getitem__(self, key):
+        if self.encrypted:
+            self.data = json.loads(
+                decrypt(base64.b64decode(self.data), self.passphrase).decode()
+            )
+            self.encrypted = False
+        return self.data[key]
+
+
 def api(name, login_token=None, passphrase=PASSPHRASE, **kwargs):
     """
     Perform an API call.
@@ -86,7 +105,7 @@ def api(name, login_token=None, passphrase=PASSPHRASE, **kwargs):
         js = json.loads(f.read().decode())
         if error := js.get("error"):
             raise RuntimeError(error)
-        return json.loads(decrypt(base64.b64decode(js["result"]), passphrase).decode())
+        return DecryptionDeferredDict(js["result"], passphrase)
 
 
 class Session:
